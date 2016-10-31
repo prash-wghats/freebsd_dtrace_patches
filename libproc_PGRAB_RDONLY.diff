@@ -1,0 +1,43 @@
+diff --git a/cddl/compat/opensolaris/include/libproc.h b/cddl/compat/opensolaris/include/libproc.h
+index 63f73ce..1902e0f 100644
+--- a/cddl/compat/opensolaris/include/libproc.h
++++ b/cddl/compat/opensolaris/include/libproc.h
+@@ -38,7 +38,6 @@
+ #define PR_RLC		0x0001
+ #define PR_KLC		0x0002
+ 
+-#define	PGRAB_RDONLY	O_RDONLY
+ #define	PGRAB_FORCE	0
+ 
+ #include_next <libproc.h>
+diff --git a/lib/libproc/libproc.h b/lib/libproc/libproc.h
+index cbb7169..d242c92 100644
+--- a/lib/libproc/libproc.h
++++ b/lib/libproc/libproc.h
+@@ -42,6 +42,8 @@ struct proc_handle;
+ 
+ typedef void (*proc_child_func)(void *);
+ 
++#define PGRAB_RDONLY 0x04
++
+ /* Values returned by proc_state(). */
+ #define PS_IDLE		1
+ #define PS_STOP		2
+diff --git a/lib/libproc/proc_create.c b/lib/libproc/proc_create.c
+index 8f65e70..d5a48b7 100644
+--- a/lib/libproc/proc_create.c
++++ b/lib/libproc/proc_create.c
+@@ -91,7 +91,12 @@ proc_attach(pid_t pid, int flags, struct proc_handle **pphdl)
+ 	error = proc_init(pid, flags, PS_RUN, phdl);
+ 	if (error != 0)
+ 		goto out;
+-
++	
++	if (flags & PGRAB_RDONLY) {
++		proc_rdagent(phdl);
++		goto out;
++	}
++	
+ 	if (ptrace(PT_ATTACH, phdl->pid, 0, 0) != 0) {
+ 		error = errno;
+ 		DPRINTF("ERROR: cannot ptrace child process %d", pid);

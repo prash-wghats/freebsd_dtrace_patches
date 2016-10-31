@@ -1,0 +1,89 @@
+
+
+
+diff --git a/sys/cddl/dev/dtrace/amd64/dtrace_isa.c b/sys/cddl/dev/dtrace/amd64/dtrace_isa.c
+index 8a39fc4..7fee4b9 100644
+--- a/sys/cddl/dev/dtrace/amd64/dtrace_isa.c
++++ b/sys/cddl/dev/dtrace/amd64/dtrace_isa.c
+@@ -503,8 +503,11 @@ dtrace_getreg(struct trapframe *rp, uint_t reg)
+ 		REG_RSP,	/* 17 UESP, REG_SP */
+ 		REG_SS		/* 18 SS */
+ 	};
+-
++#ifdef illumos
+ 	if (reg <= SS) {
++#else
++	if (reg <= GS) {
++#endif
+ 		if (reg >= sizeof (regmap) / sizeof (int)) {
+ 			DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);
+ 			return (0);
+@@ -513,7 +516,11 @@ dtrace_getreg(struct trapframe *rp, uint_t reg)
+ 		reg = regmap[reg];
+ 	} else {
+ 		/* This is dependent on reg.d. */
++#ifdef illumos
+ 		reg -= SS + 1;
++#else
++		reg -= GS + 1;
++#endif
+ 	}
+ 
+ 	switch (reg) {
+diff --git a/sys/cddl/dev/dtrace/x86/regset.h b/sys/cddl/dev/dtrace/x86/regset.h
+index a87b29b..7d1373c 100644
+--- a/sys/cddl/dev/dtrace/x86/regset.h
++++ b/sys/cddl/dev/dtrace/x86/regset.h
+@@ -90,16 +90,17 @@ extern "C" {
+ #define	REG_R14		1
+ #define	REG_R15		0
+ #else	/* !illumos */
+-#define	REG_SS		25
+-#define	REG_RSP		24
+-#define	REG_RFL		23
+-#define	REG_CS		22
+-#define	REG_RIP		21
+-#define	REG_DS		20
+-#define	REG_ES		19
+-#define	REG_ERR		18
+-#define	REG_GS		17
+-#define	REG_FS		16
++#define	REG_DS		25
++#define	REG_ES		24
++
++#define	REG_GS		23
++#define	REG_FS		22
++#define	REG_SS		21
++#define	REG_RSP		20
++#define	REG_RFL		19
++#define	REG_CS		18
++#define	REG_RIP		17
++#define	REG_ERR		16
+ #define	REG_TRAPNO	15
+ #define	REG_RAX		14
+ #define	REG_RCX		13
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,315 @@
+diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
+index 88fdeeb..b05f5c1 100644
+--- a/sys/amd64/amd64/trap.c
++++ b/sys/amd64/amd64/trap.c
+@@ -96,7 +96,11 @@ PMC_SOFT_DEFINE( , , page_fault, write);
+ #include <machine/tss.h>
+ 
+ #ifdef KDTRACE_HOOKS
++#include <cddl/compat/opensolaris/sys/cred.h>
++#include <cddl/dev/dtrace/dtrace_cddl.h>
+ #include <sys/dtrace_bsd.h>
++#include <cddl/dev/dtrace/x86/regset.h>
++#include <sys/wait.h>
+ #endif
+ 
+ extern void __noinline trap(struct trapframe *frame);
+@@ -172,7 +176,9 @@ void
+ trap(struct trapframe *frame)
+ {
+ #ifdef KDTRACE_HOOKS
+-	struct reg regs;
++	struct reg regs, *rp;
++	uint8_t step, ret, reg;
++	uintptr_t regv, npc;
+ #endif
+ 	struct thread *td = curthread;
+ 	struct proc *p = td->td_proc;
+@@ -424,8 +430,68 @@ trap(struct trapframe *frame)
+ 			break;
+ #ifdef KDTRACE_HOOKS
+ 		case T_DTRACE_RET:
++			step = td->t_dtrace_step;
++			ret = td->t_dtrace_ret;
++			reg = td->t_dtrace_reg;
++			regv = td->t_dtrace_regv;
++			npc = td->t_dtrace_npc;
++			
+ 			enable_intr();
+ 			fill_frame_regs(frame, &regs);
++			rp = &regs;
++			
++			/* from dtrace_user_probe */
++			if (td->t_dtrace_ast) {
++				signotify(td);
++			}
++			
++			/*
++			 * Clear all user tracing flags.
++			 */
++			td->t_dtrace_ft = 0;
++			
++			/*
++			 * If we weren't expecting to take a return probe trap, kill
++			 * the process as though it had just executed an unassigned
++			 * trap instruction.
++			 */
++			if (step == 0) {
++				kern_psignal(p, SIGILL);
++				goto out;
++			}
++			
++			/*
++			 * If we hit this trap unrelated to a return probe, we're
++			 * just here to reset the AST flag since we deferred a signal
++			 * until after we logically single-stepped the instruction we
++			 * copied out.
++			 */
++			if (ret == 0) {
++				/* clean up any registers used to emulate %rip-relative 
++				 * instructions in 64-bit mode.
++				 */
++				switch (reg) {
++				case REG_RAX:
++					rp->r_rax = regv;
++					break;
++				case REG_RCX:
++					rp->r_rcx = regv;
++					break;
++				case REG_R8:
++					rp->r_r8 = regv;
++					break;
++				case REG_R9:
++					rp->r_r9 = regv;
++					break;
++				}
++				
++				rp->r_rip = npc;
++				PROC_LOCK(p);
++				proc_write_regs(td, rp);
++				PROC_UNLOCK(p);
++				goto out;
++			}
++			
+ 			if (dtrace_return_probe_ptr != NULL &&
+ 			    dtrace_return_probe_ptr(&regs) == 0)
+ 				goto out;
+diff --git a/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c b/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
+index 5b3f485..2ee52ce 100644
+--- a/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
++++ b/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
+@@ -1750,8 +1750,11 @@ fasttrap_pid_probe(struct reg *rp)
+ 		bcopy(tp->ftt_instr, &scratch[i], tp->ftt_size);
+ 		i += tp->ftt_size;
+ 		scratch[i++] = FASTTRAP_INT;
++#ifdef illumos
+ 		scratch[i++] = T_DTRACE_RET;
+-
++#else
++		scratch[i++] =	IDT_DTRACE_RET;
++#endif
+ 		ASSERT(i <= sizeof (scratch));
+ 
+ #ifdef illumos
+diff --git a/sys/cddl/dev/dtrace/amd64/dtrace_subr.c b/sys/cddl/dev/dtrace/amd64/dtrace_subr.c
+index b371def..9319a80 100644
+--- a/sys/cddl/dev/dtrace/amd64/dtrace_subr.c
++++ b/sys/cddl/dev/dtrace/amd64/dtrace_subr.c
+@@ -43,6 +43,10 @@
+ #include <machine/clock.h>
+ #include <machine/frame.h>
+ #include <vm/pmap.h>
++#include <cddl/dev/dtrace/dtrace_cddl.h>
++#include <cddl/dev/dtrace/x86/regset.h>
++#include <machine/reg.h>
++#include <sys/ptrace.h>
+ 
+ extern void dtrace_getnanotime(struct timespec *tsp);
+ 
+@@ -138,15 +142,24 @@ dtrace_sync(void)
+         dtrace_xcall(DTRACE_CPUALL, (dtrace_xcall_t)dtrace_sync_func, NULL);
+ }
+ 
+-#ifdef notyet
+ void
+ dtrace_safe_synchronous_signal(void)
+ {
+ 	kthread_t *t = curthread;
++#ifdef illumos
+ 	struct regs *rp = lwptoregs(ttolwp(t));
++#else
++#define	r_pc r_rip
++	struct reg regs, *rp;
++	proc_t *p = curproc;
++#endif
+ 	size_t isz = t->t_dtrace_npc - t->t_dtrace_pc;
+ 
+ 	ASSERT(t->t_dtrace_on);
++#ifndef illumos
++	fill_frame_regs(t->td_frame, &regs);
++	rp = &regs;
++#endif
+ 
+ 	/*
+ 	 * If we're not in the range of scratch addresses, we're not actually
+@@ -162,17 +175,31 @@ dtrace_safe_synchronous_signal(void)
+ 		rp->r_pc = t->t_dtrace_pc;
+ 		t->t_dtrace_ft = 0;
+ 	}
++#ifndef illumos
++	PROC_LOCK(p);
++	proc_write_regs(curthread, rp);
++	PROC_UNLOCK(p);
++#endif
+ }
+ 
+ int
+ dtrace_safe_defer_signal(void)
+ {
+ 	kthread_t *t = curthread;
++#ifdef illumos
+ 	struct regs *rp = lwptoregs(ttolwp(t));
++#else
++#define	r_pc r_rip
++	struct reg regs, *rp;
++	proc_t *p = curproc;
++#endif
+ 	size_t isz = t->t_dtrace_npc - t->t_dtrace_pc;
+ 
+ 	ASSERT(t->t_dtrace_on);
+-
++#ifndef illumos
++	fill_frame_regs(t->td_frame, &regs);
++	rp = &regs;
++#endif
+ 	/*
+ 	 * If we're not in the range of scratch addresses, we're not actually
+ 	 * tracing user instructions so turn off the flags.
+@@ -219,6 +246,11 @@ dtrace_safe_defer_signal(void)
+ #endif
+ 		rp->r_pc = t->t_dtrace_npc;
+ 		t->t_dtrace_ft = 0;
++#ifndef illumos
++		PROC_LOCK(p);
++		proc_write_regs(curthread, rp);
++		PROC_UNLOCK(p);
++#endif
+ 		return (0);
+ 	}
+ 
+@@ -233,10 +265,13 @@ dtrace_safe_defer_signal(void)
+ 	}
+ 
+ 	t->t_dtrace_ast = 1;
+-
++#ifndef illumos
++	PROC_LOCK(p);
++	proc_write_regs(curthread, rp);
++	PROC_UNLOCK(p);
++#endif
+ 	return (1);
+ }
+-#endif
+ 
+ static int64_t	tgt_cpu_tsc;
+ static int64_t	hst_cpu_tsc;
+diff --git a/sys/cddl/dev/dtrace/dtrace_load.c b/sys/cddl/dev/dtrace/dtrace_load.c
+index 493fee5..7fa8a3c 100644
+--- a/sys/cddl/dev/dtrace/dtrace_load.c
++++ b/sys/cddl/dev/dtrace/dtrace_load.c
+@@ -55,6 +55,9 @@ dtrace_load(void *dummy)
+ 	/* Hook into the trap handler. */
+ 	dtrace_trap_func = dtrace_trap;
+ 
++	dtrace_sync_signal_func = dtrace_safe_synchronous_signal;
++	dtrace_async_signal_func = dtrace_safe_defer_signal;
++
+ 	/* Hang our hook for thread switches. */
+ 	dtrace_vtime_switch_func = dtrace_vtime_switch;
+ 
+diff --git a/sys/cddl/dev/dtrace/dtrace_unload.c b/sys/cddl/dev/dtrace/dtrace_unload.c
+index 2bd547b..761fa9e 100644
+--- a/sys/cddl/dev/dtrace/dtrace_unload.c
++++ b/sys/cddl/dev/dtrace/dtrace_unload.c
+@@ -119,6 +119,9 @@ dtrace_unload()
+ 	dtrace_vtime_active = 0;
+ 	dtrace_vtime_switch_func = NULL;
+ 
++	dtrace_sync_signal_func = NULL;
++	dtrace_async_signal_func = NULL;
++
+ 	/* Unhook from the trap handler. */
+ 	dtrace_trap_func = NULL;
+ 
+diff --git a/sys/kern/kern_sig.c b/sys/kern/kern_sig.c
+index 10fc392..63a2ccf 100644
+--- a/sys/kern/kern_sig.c
++++ b/sys/kern/kern_sig.c
+@@ -91,6 +91,15 @@ __FBSDID("$FreeBSD: releng/11.0/sys/kern/kern_sig.c 302328 2016-07-03 18:19:48Z
+ 
+ #include <security/audit/audit.h>
+ 
++#ifdef KDTRACE_HOOKS
++#include <sys/dtrace_bsd.h>
++#include <cddl/compat/opensolaris/sys/cred.h>
++#include <cddl/dev/dtrace/dtrace_cddl.h>
++
++dtrace_sync_signal_func_t	dtrace_sync_signal_func;
++dtrace_async_signal_func_t	dtrace_async_signal_func;
++#endif
++
+ #define	ONSIG	32		/* NSIG for osig* syscalls.  XXX. */
+ 
+ SDT_PROVIDER_DECLARE(proc);
+@@ -567,6 +576,12 @@ cursig(struct thread *td)
+ 	PROC_LOCK_ASSERT(td->td_proc, MA_OWNED);
+ 	mtx_assert(&td->td_proc->p_sigacts->ps_mtx, MA_OWNED);
+ 	THREAD_LOCK_ASSERT(td, MA_NOTOWNED);
++#ifdef KDTRACE_HOOKS
++		if (dtrace_async_signal_func != NULL && td->t_dtrace_on) {
++			if ((*dtrace_async_signal_func)())
++				return 0;
++		}
++#endif	
+ 	return (SIGPENDING(td) ? issignal(td) : 0);
+ }
+ 
+@@ -1954,6 +1969,11 @@ trapsignal(struct thread *td, ksiginfo_t *ksi)
+ 	code = ksi->ksi_code;
+ 	KASSERT(_SIG_VALID(sig), ("invalid signal"));
+ 
++#ifdef KDTRACE_HOOKS
++	if (dtrace_sync_signal_func != NULL && td->t_dtrace_on)
++		(*dtrace_sync_signal_func)();
++#endif
++
+ 	PROC_LOCK(p);
+ 	ps = p->p_sigacts;
+ 	mtx_lock(&ps->ps_mtx);
+@@ -2961,6 +2981,7 @@ postsig(sig)
+ 		 */
+ 		KASSERT(action != SIG_IGN && !SIGISMEMBER(td->td_sigmask, sig),
+ 		    ("postsig action"));
++		    	
+ 		/*
+ 		 * Set the new mask value and also defer further
+ 		 * occurrences of this signal.
+diff --git a/sys/sys/dtrace_bsd.h b/sys/sys/dtrace_bsd.h
+index 4fe1512..b4271dc 100644
+--- a/sys/sys/dtrace_bsd.h
++++ b/sys/sys/dtrace_bsd.h
+@@ -41,6 +41,14 @@ struct reg;
+ 
+ int dtrace_trap(struct trapframe *, u_int);
+ 
++typedef void (*dtrace_sync_signal_func_t)(void);
++void dtrace_safe_synchronous_signal(void);
++extern dtrace_sync_signal_func_t	dtrace_sync_signal_func;
++
++typedef int (*dtrace_async_signal_func_t)(void);
++int dtrace_safe_defer_signal(void);
++extern dtrace_async_signal_func_t	dtrace_async_signal_func;
++
+ /*
+  * The dtrace module handles traps that occur during a DTrace probe.
+  * This type definition is used in the trap handler to provide a

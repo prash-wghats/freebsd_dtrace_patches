@@ -1,0 +1,20 @@
+diff --git a/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c b/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
+index 2ee52ce..95e32e0 100644
+--- a/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
++++ b/sys/cddl/contrib/opensolaris/uts/intel/dtrace/fasttrap_isa.c
+@@ -474,7 +474,14 @@ fasttrap_tracepoint_init(proc_t *p, fasttrap_tracepoint_t *tp, uintptr_t pc,
+ 				    regmap[base | (FASTTRAP_REX_B(rex) << 3)];
+ 
+ 				i = 3;
+-				sz = mod == 1 ? 1 : 4;
++				/*
++				 * See AMD x86-64 Architecture Programmer's Manual
++				 * Volume 3, Section 1.4.3, Table 1-14.
++				 */
++				if (mod == 0) 
++					sz = 0;
++				else
++					sz = mod == 1 ? 1 : 4;
+ 			} else {
+ 				/*
+ 				 * In 64-bit mode, mod == 0 and r/m == 5
